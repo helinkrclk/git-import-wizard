@@ -1,5 +1,5 @@
 import { GoogleGenAI } from "@google/genai";
-import { motion, AnimatePresence } from "motion/react";
+import { motion, AnimatePresence } from "framer-motion";
 import { 
   Send, 
   ArrowLeft, 
