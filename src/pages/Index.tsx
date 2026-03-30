@@ -1,12 +1,12 @@
 import { GoogleGenAI } from "@google/genai";
 import { motion, AnimatePresence } from "framer-motion";
-import { 
-  Send, 
-  ArrowLeft, 
-  LogOut, 
-  Briefcase, 
-  Heart, 
-  Mic2, 
+import {
+  Send,
+  ArrowLeft,
+  LogOut,
+  Briefcase,
+  Heart,
+  Mic2,
   Settings2,
   RotateCcw,
   Sparkles,
@@ -30,6 +30,17 @@ interface Analysis {
 }
 
 type FlowPhase = "needs_topic" | "roleplay";
+
+interface GeminiErrorPayload {
+  error?: {
+    code?: number;
+    message?: string;
+    details?: Array<{
+      "@type"?: string;
+      retryDelay?: string;
+    }>;
+  };
+}
 
 // --- Constants ---
 const DEFAULT_ACCENT = "#6366f1";
@@ -95,6 +106,57 @@ const rgbToHex = (r: number, g: number, b: number) => {
   return `#${toHex(r)}${toHex(g)}${toHex(b)}`;
 };
 
+const parseGeminiError = (error: unknown) => {
+  const fallback = {
+    status: undefined as number | undefined,
+    rawMessage: "",
+    retryDelay: undefined as string | undefined,
+  };
+
+  if (!(error instanceof Error)) return fallback;
+
+  const maybeApiError = error as Error & { status?: number };
+  let status = maybeApiError.status;
+  let rawMessage = error.message || "";
+  let retryDelay: string | undefined;
+
+  if (rawMessage.trim().startsWith("{")) {
+    try {
+      const parsed = JSON.parse(rawMessage) as GeminiErrorPayload;
+      status = parsed.error?.code ?? status;
+      rawMessage = parsed.error?.message || rawMessage;
+      retryDelay = parsed.error?.details?.find((detail) => detail["@type"]?.includes("RetryInfo"))?.retryDelay;
+    } catch {
+      return { status, rawMessage, retryDelay };
+    }
+  }
+
+  return { status, rawMessage, retryDelay };
+};
+
+const formatRetryDelay = (retryDelay?: string) => {
+  if (!retryDelay) return "";
+
+  const seconds = Number.parseInt(retryDelay.replace(/\D/g, ""), 10);
+  if (Number.isNaN(seconds) || seconds <= 0) return "";
+
+  return ` Yaklaşık ${seconds} saniye sonra tekrar deneyebilirsin.`;
+};
+
+const getGeminiErrorMessage = (error: unknown) => {
+  const { status, rawMessage, retryDelay } = parseGeminiError(error);
+
+  if (status === 429 || /quota|resource_exhausted|limit:\s*0/i.test(rawMessage)) {
+    return `Gemini API bu anahtar için istek kabul etmiyor: kota aşıldı veya proje için kota aktif değil (limit: 0). Google tarafında kota/billing ayarını kontrol et ya da farklı bir API anahtarı kullan.${formatRetryDelay(retryDelay)}`;
+  }
+
+  if (/api key|authentication|permission denied/i.test(rawMessage)) {
+    return "Gemini API anahtarı geçersiz veya yetkisiz görünüyor. Secret değerini tekrar kontrol et.";
+  }
+
+  return "Gemini isteği başarısız oldu. Lütfen tekrar dene.";
+};
+
 const Index = () => {
   const [accentColor, setAccentColor] = useState(() => localStorage.getItem("SPEAKUP_THEME_COLOR") || DEFAULT_ACCENT);
   const [messages, setMessages] = useState<Message[]>([]);
@@ -119,7 +181,7 @@ const Index = () => {
       const bg1 = rgbToHex(...Object.values(hslToRgb((h + 0) % 360, 85, 92)) as [number, number, number]);
       const bg2 = rgbToHex(...Object.values(hslToRgb((h + 40) % 360, 80, 92)) as [number, number, number]);
       const bg3 = rgbToHex(...Object.values(hslToRgb((h + 120) % 360, 75, 92)) as [number, number, number]);
-      
+
       document.documentElement.style.setProperty("--bg1", bg1);
       document.documentElement.style.setProperty("--bg2", bg2);
       document.documentElement.style.setProperty("--bg3", bg3);
@@ -166,13 +228,13 @@ const Index = () => {
       setSelectedTopic(userMsg);
       currentPhase = "roleplay";
       setFlowPhase("roleplay");
-      
+
       const t = userMsg.toLowerCase();
       if (t.includes("maaş") || t.includes("pazarlık")) currentPersona = "Patron (pazarlıkçı)";
       else if (t.includes("arkadaş") || t.includes("sınır")) currentPersona = "Zor bir arkadaş (savunmacı)";
       else if (t.includes("mülakat") || t.includes("iş")) currentPersona = "Mülakatçı (net ve şüpheci)";
       else currentPersona = "Şüpheci bir karşı taraf";
-      
+
       setSelectedPersona(currentPersona);
     }
 
@@ -180,15 +242,15 @@ const Index = () => {
       const systemInstruction = `
         Sen SpeakUp AI sosyal koçusun. Senaryo: ${currentScenario}.
         Amacın: sosyal kaygı yaşayan kullanıcının güvenli bir ortamda pratik kazanmasını sağlamak.
-        
+
         AKTİF DURUM: ${currentPhase === "roleplay" ? "ROLE-PLAY MODU" : "KONU BELİRLEME MODU"}.
         Konu: ${currentTopic}.
         Persona: ${currentPersona}.
-        
+
         KRİTİK TALİMAT:
         - Eğer phase=roleplay ise, ASLA "hangi konuda pratik yapmak istersin" veya "ne hakkında konuşalım" diye sorma. Konu zaten "${currentTopic}" olarak belirlendi.
         - Doğrudan role-play karakterine bürün ve konuşmayı başlat/devam ettir.
-        
+
         KURALLAR:
         1. Karakterine tam bürün. Kısa, gerçekçi ve bazen hafif zorlayıcı ol.
         2. Her mesajda: (a) Rol-uyumlu yanıt ver, (b) En fazla 1 soru sor, (c) 1 küçük meydan okuma ver, (d) 1 yapıcı geri bildirim ekle.
@@ -198,7 +260,7 @@ const Index = () => {
 
       const response = await ai.models.generateContent({
         model: "gemini-2.0-flash",
-        contents: newMessages.map(m => ({ role: m.role, parts: [{ text: m.text }] })),
+        contents: newMessages.map((m) => ({ role: m.role, parts: [{ text: m.text }] })),
         config: {
           systemInstruction,
           temperature: 0.8,
@@ -206,10 +268,10 @@ const Index = () => {
       });
 
       const aiText = response.text || "Üzgünüm, bir hata oluştu.";
-      setMessages(prev => [...prev, { role: "model", text: aiText }]);
+      setMessages((prev) => [...prev, { role: "model", text: aiText }]);
     } catch (error) {
       console.error(error);
-      setMessages(prev => [...prev, { role: "model", text: "Bağlantı hatası oluştu. Lütfen tekrar deneyin." }]);
+      setMessages((prev) => [...prev, { role: "model", text: getGeminiErrorMessage(error) }]);
     } finally {
       setIsTyping(false);
     }
@@ -219,7 +281,7 @@ const Index = () => {
     if (!ai) return;
     setIsTyping(true);
     try {
-      const userMessages = messages.filter(m => m.role === "user").map(m => m.text).join("\n");
+      const userMessages = messages.filter((m) => m.role === "user").map((m) => m.text).join("\n");
       const prompt = `
         Aşağıdaki konuşma geçmişindeki KULLANICI mesajlarını analiz et.
         JSON formatında şu bilgileri ver:
@@ -228,7 +290,7 @@ const Index = () => {
           "bestPhrases": ["en iyi 1. cümle", "en iyi 2. cümle"],
           "advice": "Gelişim tavsiyeleri (madde madde)"
         }
-        
+
         Kullanıcı Mesajları:
         ${userMessages}
       `;
@@ -244,6 +306,7 @@ const Index = () => {
       setShowAnalysis(true);
     } catch (error) {
       console.error(error);
+      setMessages((prev) => [...prev, { role: "model", text: `Oturum analizi alınamadı. ${getGeminiErrorMessage(error)}` }]);
     } finally {
       setIsTyping(false);
     }
@@ -267,13 +330,13 @@ const Index = () => {
         <div className="flex items-center gap-3">
           <div className="hidden sm:flex items-center gap-2 bg-white/15 border border-white/20 px-3 py-1.5 rounded-xl">
             <Settings2 className="w-4 h-4" />
-            <input 
-              type="color" 
-              value={accentColor} 
+            <input
+              type="color"
+              value={accentColor}
               onChange={(e) => setAccentColor(e.target.value)}
-              className="w-6 h-6 bg-transparent border-0 p-0 cursor-pointer" 
+              className="w-6 h-6 bg-transparent border-0 p-0 cursor-pointer"
             />
-            <button 
+            <button
               onClick={() => setAccentColor(DEFAULT_ACCENT)}
               className="text-xs font-bold px-2 py-1 rounded-lg bg-white/15 hover:bg-white/25 transition"
             >
@@ -288,7 +351,7 @@ const Index = () => {
       <main className="flex-1 overflow-y-auto p-4">
         <div className="max-w-5xl mx-auto w-full">
           {!currentScenario ? (
-            <motion.div 
+            <motion.div
               initial={{ opacity: 0, y: 20 }}
               animate={{ opacity: 1, y: 0 }}
               className="bg-white/55 backdrop-blur-md border border-white/70 shadow-lg rounded-3xl p-6 md:p-8"
@@ -337,20 +400,20 @@ const Index = () => {
                   Kendi Senaryonu Yaz
                 </h3>
                 <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-4">
-                  <input 
+                  <input
                     value={customRole}
                     onChange={(e) => setCustomRole(e.target.value)}
-                    placeholder="Rol / kişi (örn: sert hoca)" 
+                    placeholder="Rol / kişi (örn: sert hoca)"
                     className="w-full border border-white/70 bg-white/70 backdrop-blur-md p-3 rounded-2xl focus:ring-2 focus:ring-indigo-300 outline-none"
                   />
-                  <input 
+                  <input
                     value={customTopic}
                     onChange={(e) => setCustomTopic(e.target.value)}
-                    placeholder="Konu (örn: tez savunması)" 
+                    placeholder="Konu (örn: tez savunması)"
                     className="w-full border border-white/70 bg-white/70 backdrop-blur-md p-3 rounded-2xl focus:ring-2 focus:ring-indigo-300 outline-none"
                   />
                 </div>
-                <button 
+                <button
                   onClick={() => startScenario("Özel Senaryo", `Rol: ${customRole}, Konu: ${customTopic}`)}
                   className="mt-4 w-full sm:w-auto bg-indigo-500/20 text-indigo-900 border border-indigo-500/30 px-8 py-3 rounded-2xl font-bold hover:bg-indigo-500/25 transition active:scale-95"
                 >
@@ -360,7 +423,7 @@ const Index = () => {
             </motion.div>
           ) : (
             <div className="flex flex-col gap-4 max-w-4xl mx-auto">
-              <AnimatePresence mode="popLayout">
+              <AnimatePresence>
                 {messages.map((m, i) => (
                   <motion.div
                     key={i}
@@ -369,8 +432,8 @@ const Index = () => {
                     className={`flex ${m.role === "user" ? "justify-end" : "justify-start"}`}
                   >
                     <div className={`p-4 rounded-2xl shadow-sm max-w-[85%] backdrop-blur-md border ${
-                      m.role === "user" 
-                        ? "bg-indigo-500 text-white border-indigo-400" 
+                      m.role === "user"
+                        ? "bg-indigo-500 text-white border-indigo-400"
                         : "bg-white/80 text-gray-900 border-white/60"
                     }`}>
                       <p className="text-sm leading-relaxed whitespace-pre-wrap">{m.text}</p>
@@ -399,27 +462,27 @@ const Index = () => {
       {currentScenario && (
         <footer className="p-4 bg-white/50 backdrop-blur-md border-t border-white/60">
           <div className="max-w-4xl mx-auto flex gap-2">
-            <button 
+            <button
               onClick={() => setCurrentScenario(null)}
               className="p-3 rounded-xl bg-white/60 border border-white/70 text-gray-700 hover:bg-white/80 transition"
             >
               <ArrowLeft className="w-5 h-5" />
             </button>
-            <input 
+            <input
               value={inputValue}
               onChange={(e) => setInputValue(e.target.value)}
               onKeyDown={(e) => e.key === "Enter" && handleSend()}
-              placeholder="Mesajınızı yazın..." 
+              placeholder="Mesajınızı yazın..."
               className="flex-1 border border-white/70 bg-white/70 backdrop-blur-md p-3 rounded-xl outline-none focus:ring-2 focus:ring-indigo-300"
             />
-            <button 
+            <button
               onClick={handleSend}
               disabled={isTyping || !inputValue.trim()}
               className="bg-indigo-500 text-white px-6 py-3 rounded-xl font-bold hover:bg-indigo-600 transition disabled:opacity-50"
             >
               <Send className="w-5 h-5" />
             </button>
-            <button 
+            <button
               onClick={handleEndSession}
               disabled={isTyping || messages.length < 3}
               className="bg-rose-500 text-white px-4 py-3 rounded-xl font-bold hover:bg-rose-600 transition disabled:opacity-50"
@@ -433,13 +496,13 @@ const Index = () => {
       {/* Analysis Modal */}
       <AnimatePresence>
         {showAnalysis && analysis && (
-          <motion.div 
+          <motion.div
             initial={{ opacity: 0 }}
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
             className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm p-4"
           >
-            <motion.div 
+            <motion.div
               initial={{ scale: 0.9, y: 20 }}
               animate={{ scale: 1, y: 0 }}
               className="bg-white/90 backdrop-blur-xl border border-white/70 rounded-3xl shadow-2xl max-w-2xl w-full overflow-hidden"
@@ -453,7 +516,7 @@ const Index = () => {
                   <LogOut className="w-5 h-5" />
                 </button>
               </div>
-              
+
               <div className="p-6 space-y-6">
                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                   <div className="bg-white p-5 rounded-2xl border border-gray-100 shadow-sm">
@@ -481,7 +544,7 @@ const Index = () => {
                   <p className="mt-3 text-sm text-gray-700 leading-relaxed whitespace-pre-wrap">{analysis.advice}</p>
                 </div>
 
-                <button 
+                <button
                   onClick={() => {
                     setCurrentScenario(null);
                     setShowAnalysis(false);
